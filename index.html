@@ -1,0 +1,359 @@
+<!DOCTYPE html>
+<html lang="ko">
+
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>스프레드시트 쿵쿵따</title>
+  <style>
+    body {
+      margin: 0;
+      font-family: Arial, sans-serif;
+      background: white;
+      overflow: hidden;
+    }
+
+    .spreadsheet {
+      display: flex;
+      flex-direction: column;
+      height: 100vh;
+    }
+
+    .sheet-toolbar {
+      height: 40px;
+      background: #f8f9fa;
+      border-bottom: 1px solid #dadce0;
+      display: flex;
+      align-items: center;
+      padding: 0 10px;
+      font-size: 13px;
+      color: #202124;
+      justify-content: space-between;
+    }
+
+    .sheet-container {
+      flex: 1;
+      overflow: auto;
+    }
+
+    table {
+      border-collapse: collapse;
+      table-layout: fixed;
+      width: max-content;
+      min-width: 100%;
+    }
+
+    th,
+    td {
+      width: 100px;
+      height: 21px;
+      border: 1px solid #dfe1e5;
+      text-align: left;
+      padding: 2px 4px;
+      font-size: 13px;
+      white-space: nowrap;
+    }
+
+    th {
+      background: #f8f9fa;
+      font-weight: normal;
+      color: #202124;
+    }
+
+    input[type="text"] {
+      width: 100%;
+      height: 100%;
+      border: none;
+      outline: none;
+      font-size: 13px;
+      background: transparent;
+      padding: 0;
+      margin: 0;
+    }
+
+    input.active-cell[type="text"] {
+      border: 2px solid #1a73e8;
+      background-color: #e8f0fe;
+    }
+
+    input.active-cell[type="text"].urgent.critical {
+      animation: shake 0.2s infinite;
+    }
+
+    @keyframes shake {
+      0% {
+        background-color: #fbe8fe;
+        transform: translateX(0);
+      }
+
+      25% {
+        background-color: #e8f0fe;
+        transform: translateX(-1px);
+      }
+
+      50% {
+        background-color: #fbe8fe;
+        transform: translateX(1px);
+      }
+
+      75% {
+        background-color: #e8f0fe;
+        transform: translateX(-1px);
+      }
+
+      100% {
+        background-color: #fbe8fe;
+        transform: translateX(0);
+      }
+    }
+
+    .log-area {
+      font-size: 13px;
+      padding: 8px;
+      border-top: 1px solid #dadce0;
+      background: #f1f3f4;
+      font-family: monospace;
+    }
+
+    .reset-button {
+      background: #1a73e8;
+      color: white;
+      border: none;
+      padding: 4px 10px;
+      border-radius: 4px;
+      cursor: pointer;
+      font-size: 12px;
+    }
+
+    #timerDisplay {
+      font-weight: bold;
+      color: #d93025;
+      padding-left: 10px;
+    }
+  </style>
+</head>
+
+<body>
+  <div class="spreadsheet">
+    <div class="sheet-toolbar">
+      <div>쿵쿵따 시트 <span id="timerDisplay"></span></div>
+      <button class="reset-button" id="resetBtn">게임 리셋</button>
+      <button class="reset-button" id="hintBtn">힌트 보기 (<span id="hintCount">3</span>회 남음)</button>
+    </div>
+    <div class="sheet-container">
+      <table>
+        <thead>
+          <tr>
+            <th style="width: 40px;">#</th>
+            <th>A</th>
+            <th>B</th>
+          </tr>
+        </thead>
+        <tbody id="gameTable"></tbody>
+      </table>
+    </div>
+    <div class="log-area">시작 단어: <span id="lastWord">쿵쿵따</span></div>
+  </div>
+
+  <script type="module">
+    import { wordList } from './wordList.js';
+
+    document.addEventListener('DOMContentLoaded', () => {
+      const gameTable = document.getElementById('gameTable');
+      const lastWordDisplay = document.getElementById('lastWord');
+      const timerDisplay = document.getElementById('timerDisplay');
+      const hintDisplay = document.getElementById('hintCount');
+      const wordSet = new Set(wordList);
+      const usedWords = new Set();
+      let lastWord;
+      let turn;
+      let isPlayerTurn;
+      let currentTimeout;
+      let currentTimeLimit;
+      let countdownInterval;
+      let activeInput = null;
+      let remainingHints = 3;
+      let userCorrectStreak = 0;
+
+      const 받침대체 = {
+        'ㄴ': ['ㄹ'], 'ㅁ': ['ㅂ'], 'ㅇ': [''], 'ㅂ': ['ㅁ'], 'ㄹ': ['ㄴ']
+      };
+
+      document.getElementById('resetBtn').addEventListener('click', resetGame);
+      document.getElementById('hintBtn').addEventListener('click', useHint);
+
+      document.addEventListener('mousedown', (e) => {
+        const isResetButton = e.target.closest('.reset-button');
+        if (!isResetButton && activeInput && e.target !== activeInput) {
+          e.preventDefault();
+          activeInput.focus();
+        }
+      });
+
+      function normalizeLastChar(char) {
+        const lastChar = char[char.length - 1];
+        return [lastChar, ...Object.values(받침대체).flat().filter(rep => rep)].filter((v, i, self) => self.indexOf(v) === i);
+      }
+
+      function getRandomWord(startChar) {
+        const candidates = normalizeLastChar(startChar).flatMap(c =>
+          wordList.filter(word => word[0] === c && !usedWords.has(word))
+        );
+        return candidates.find(word => {
+          const nextCandidates = normalizeLastChar(word[2]).flatMap(c =>
+            wordList.filter(nextWord => nextWord[0] === c && !usedWords.has(nextWord))
+          );
+          return nextCandidates.length > 0;
+        }) || '끝';
+      }
+
+      function useHint() {
+        if (!isPlayerTurn || remainingHints <= 0 || !activeInput) return;
+        const candidates = normalizeLastChar(lastWord[2]).flatMap(c =>
+          wordList.filter(word => word[0] === c && !usedWords.has(word))
+        );
+        const hint = candidates[Math.floor(Math.random() * candidates.length)] || '';
+        activeInput.placeholder = `예: ${hint}`;
+        remainingHints--;
+        hintDisplay.textContent = remainingHints;
+      }
+
+      function startCountdown(seconds, input) {
+        activeInput = input;
+        let remaining = seconds;
+        timerDisplay.textContent = `⏳ ${remaining}s`;
+        clearInterval(countdownInterval);
+        countdownInterval = setInterval(() => {
+          remaining--;
+          timerDisplay.textContent = `⏳ ${remaining}s`;
+          if (remaining <= 8 && document.activeElement === input) input.classList.add('urgent', 'critical');
+          else if (remaining <= 5 && document.activeElement === input) input.classList.add('urgent');
+          if (remaining <= 0) clearInterval(countdownInterval);
+        }, 1000);
+      }
+
+      function stopCountdown(input) {
+        clearInterval(countdownInterval);
+        timerDisplay.textContent = '';
+        if (input) {
+          input.classList.remove('urgent', 'critical');
+          input.disabled = true;
+          input.placeholder = '';
+        }
+        activeInput = null;
+      }
+
+      function typeOutWord(targetElement, word, callback) {
+        let i = 0;
+        targetElement.textContent = '';
+        const interval = setInterval(() => {
+          targetElement.textContent += word[i];
+          i++;
+          if (i >= word.length) {
+            clearInterval(interval);
+            if (callback) callback();
+          }
+        }, 200);
+      }
+
+      function addRow(player = false) {
+        const row = document.createElement('tr');
+        const cellIdx = document.createElement('td');
+        const cellInput = document.createElement('td');
+        const cellResult = document.createElement('td');
+
+        cellIdx.textContent = turn;
+
+        if (player) {
+          const input = document.createElement('input');
+          input.type = 'text';
+          input.maxLength = 6;
+          input.addEventListener('focus', () => input.classList.add('active-cell'));
+          input.addEventListener('blur', () => input.classList.remove('active-cell'));
+          input.addEventListener('keydown', (e) => {
+            if (e.key === 'Enter') {
+              clearTimeout(currentTimeout);
+              stopCountdown(input);
+              const value = input.value.trim();
+              if (value.length !== 3) {
+                cellResult.textContent = '❌ (3글자 아님)';
+                userCorrectStreak = 0;
+              } else if (!normalizeLastChar(lastWord[2]).includes(value[0])) {
+                cellResult.textContent = `❌ ('${lastWord[2]}'(의 유사음)로 시작해야 함)`;
+                userCorrectStreak = 0;
+              } else if (!wordSet.has(value)) {
+                cellResult.textContent = `❌ (등록된 단어 아님)`;
+                userCorrectStreak = 0;
+              } else if (usedWords.has(value)) {
+                cellResult.textContent = `❌ (이미 사용한 단어)`;
+                userCorrectStreak = 0;
+              } else {
+                cellResult.textContent = '✅';
+                lastWord = value;
+                lastWordDisplay.textContent = lastWord;
+                usedWords.add(value);
+                isPlayerTurn = false;
+                currentTimeLimit = Math.max(5, currentTimeLimit - 2);
+                userCorrectStreak++;
+                if (userCorrectStreak >= 2) {
+                  remainingHints++;
+                  userCorrectStreak = 0;
+                  hintDisplay.textContent = remainingHints;
+                }
+                setTimeout(() => addRow(false), 500);
+              }
+            }
+          });
+          cellInput.appendChild(input);
+          setTimeout(() => input.focus(), 0);
+          startCountdown(currentTimeLimit, input);
+          currentTimeout = setTimeout(() => {
+            stopCountdown(input);
+            input.disabled = true;
+            cellResult.textContent = `⏰ 타임오버 (${currentTimeLimit}초)`;
+            userCorrectStreak = 0;
+          }, currentTimeLimit * 1000);
+        } else {
+          const computerWord = getRandomWord(lastWord[2]);
+          typeOutWord(cellInput, computerWord);
+          if (computerWord === '끝') {
+            cellResult.textContent = '✅ (컴퓨터 패배)';
+          } else {
+            cellResult.textContent = '✅';
+            lastWord = computerWord;
+            lastWordDisplay.textContent = lastWord;
+            usedWords.add(computerWord);
+            isPlayerTurn = true;
+            setTimeout(() => addRow(true), 500);
+          }
+        }
+
+        row.appendChild(cellIdx);
+        row.appendChild(cellInput);
+        row.appendChild(cellResult);
+        gameTable.appendChild(row);
+        turn++;
+      }
+
+      function resetGame() {
+        clearTimeout(currentTimeout);
+        stopCountdown();
+        gameTable.innerHTML = '';
+        lastWord = wordList[Math.floor(Math.random() * wordList.length)];
+        turn = 1;
+        currentTimeLimit = 20;
+        isPlayerTurn = false;
+        remainingHints = 3;
+        userCorrectStreak = 0;
+        hintDisplay.textContent = remainingHints;
+        lastWordDisplay.textContent = lastWord;
+        usedWords.clear();
+        addRow(false);
+      }
+
+      resetGame();
+    });
+  </script>
+</body>
+
+</html>
